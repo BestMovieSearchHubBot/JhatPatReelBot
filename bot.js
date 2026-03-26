@@ -15,7 +15,7 @@ if (!BOT_TOKEN || !RAPID_API_KEY) {
 }
 
 // ========================
-//  EXPRESS SERVER (keeps the bot alive on Render)
+//  EXPRESS SERVER
 // ========================
 const app = express();
 app.get("/", (req, res) => res.send("✅ Bot is running"));
@@ -30,17 +30,60 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 //  UTILITY FUNCTIONS
 // ========================
 
-/**
- * Extracts the base Instagram URL (removes tracking parameters)
- */
 function cleanLink(link) {
   return link.split("?")[0];
 }
 
 /**
- * Downloads Instagram media using RapidAPI
- * Returns an array of media URLs (for carousel posts) or a single URL string.
+ * Tries to extract media URLs from any API response
  */
+function extractMediaUrls(data) {
+  const urls = [];
+
+  // Helper to add a URL if it's a string
+  const addUrl = (val) => {
+    if (val && typeof val === "string" && (val.startsWith("http") || val.startsWith("https"))) {
+      urls.push(val);
+    }
+  };
+
+  // Helper to process arrays
+  const processArray = (arr) => {
+    if (Array.isArray(arr)) {
+      for (const item of arr) {
+        if (typeof item === "string") addUrl(item);
+        else if (item.url) addUrl(item.url);
+        else if (item.video) addUrl(item.video);
+        else if (item.image) addUrl(item.image);
+      }
+    }
+  };
+
+  // Common field names
+  const fields = ["video", "video_url", "url", "media", "image", "images", "carousel_media", "videos"];
+  for (const field of fields) {
+    const val = data[field];
+    if (val) {
+      if (typeof val === "string") addUrl(val);
+      else if (Array.isArray(val)) processArray(val);
+      else if (typeof val === "object" && val.url) addUrl(val.url);
+    }
+  }
+
+  // If data has a nested "data" object
+  if (data.data && typeof data.data === "object") {
+    const nestedUrls = extractMediaUrls(data.data);
+    urls.push(...nestedUrls);
+  }
+
+  // If data itself is an array
+  if (Array.isArray(data)) {
+    processArray(data);
+  }
+
+  return [...new Set(urls)]; // remove duplicates
+}
+
 async function downloadInstagramMedia(url) {
   try {
     const response = await axios.get(
@@ -50,75 +93,32 @@ async function downloadInstagramMedia(url) {
         headers: {
           "x-rapidapi-key": RAPID_API_KEY,
           "x-rapidapi-host": "instagram-reels-downloader-api.p.rapidapi.com",
-          "Content-Type": "application/json", // optional but added for completeness
+          "Content-Type": "application/json",
         },
-        timeout: 15000, // 15 seconds timeout
+        timeout: 15000,
       }
     );
 
-    // Log the full response for debugging (optional, remove in production)
-    console.log("API Response:", JSON.stringify(response.data, null, 2));
+    // Log the full response (this will appear in your server logs)
+    console.log("=== API Response for", url, "===");
+    console.log(JSON.stringify(response.data, null, 2));
+    console.log("=================================");
 
-    // Check if the response indicates success
+    // Check for error status
     if (response.data.status && response.data.status !== "ok") {
-      throw new Error(`API error: ${response.data.message || "Unknown error"}`);
+      throw new Error(`API returned status "${response.data.status}": ${response.data.message || "No details"}`);
     }
 
-    // Try to extract media URLs from various possible structures
-    let mediaUrls = [];
-
-    // 1. If there's a video_url (for reels/videos)
-    if (response.data.video_url) {
-      mediaUrls.push(response.data.video_url);
-    }
-    // 2. If there's a video field (sometimes it's an object)
-    else if (response.data.video && typeof response.data.video === "string") {
-      mediaUrls.push(response.data.video);
-    }
-    // 3. If there's an array of images (carousel)
-    else if (response.data.images && Array.isArray(response.data.images)) {
-      mediaUrls.push(...response.data.images);
-    }
-    // 4. If there's an array of videos (rare)
-    else if (response.data.videos && Array.isArray(response.data.videos)) {
-      mediaUrls.push(...response.data.videos);
-    }
-    // 5. If there's a media field (as originally used)
-    else if (response.data.media) {
-      if (typeof response.data.media === "string") {
-        mediaUrls.push(response.data.media);
-      } else if (Array.isArray(response.data.media)) {
-        mediaUrls.push(...response.data.media);
-      }
-    }
-    // 6. If there's a carousel_media field (another common name)
-    else if (response.data.carousel_media && Array.isArray(response.data.carousel_media)) {
-      mediaUrls.push(...response.data.carousel_media);
-    }
-    // 7. If the whole response is an array (unlikely)
-    else if (Array.isArray(response.data)) {
-      mediaUrls.push(...response.data);
-    }
-    // 8. If the response contains a data object (nested)
-    else if (response.data.data) {
-      const nested = response.data.data;
-      if (nested.video_url) mediaUrls.push(nested.video_url);
-      else if (nested.images) mediaUrls.push(...nested.images);
-      else if (nested.media) mediaUrls.push(...nested.media);
-    }
-
-    // Remove any falsy values and ensure each is a string
-    mediaUrls = mediaUrls.filter(Boolean).map(item => typeof item === "string" ? item : item.url || item);
+    // Extract media URLs
+    const mediaUrls = extractMediaUrls(response.data);
 
     if (mediaUrls.length === 0) {
+      console.error("No URLs extracted. Raw response:", response.data);
       throw new Error("No media URLs found in API response. Check the link or API.");
     }
 
-    // If only one URL, return as a string for simpler handling
-    if (mediaUrls.length === 1) {
-      return mediaUrls[0];
-    }
-    return mediaUrls;
+    // Return single string if only one, else array
+    return mediaUrls.length === 1 ? mediaUrls[0] : mediaUrls;
   } catch (error) {
     console.error("Download API error:", error.message);
     if (error.response) {
@@ -128,9 +128,6 @@ async function downloadInstagramMedia(url) {
   }
 }
 
-/**
- * Sends a single media (video or image) to Telegram
- */
 async function sendMedia(chatId, mediaUrl, type) {
   try {
     if (type === "video") {
@@ -138,7 +135,6 @@ async function sendMedia(chatId, mediaUrl, type) {
     } else if (type === "image") {
       await bot.sendPhoto(chatId, mediaUrl, { caption: "✅ Image downloaded" });
     } else {
-      // Fallback: let Telegram detect
       await bot.sendDocument(chatId, mediaUrl, { caption: "✅ Media downloaded" });
     }
   } catch (err) {
@@ -147,13 +143,10 @@ async function sendMedia(chatId, mediaUrl, type) {
   }
 }
 
-/**
- * Determines media type based on URL extension or content type (simplified)
- */
 function guessMediaType(url) {
   const ext = url.split(".").pop().split("?")[0];
-  if (["mp4", "mov", "avi"].includes(ext)) return "video";
-  if (["jpg", "jpeg", "png", "gif"].includes(ext)) return "image";
+  if (["mp4", "mov", "avi", "webm"].includes(ext)) return "video";
+  if (["jpg", "jpeg", "png", "gif", "webp"].includes(ext)) return "image";
   return "document";
 }
 
@@ -161,7 +154,6 @@ function guessMediaType(url) {
 //  BOT HANDLERS
 // ========================
 
-// Handle /start command
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   const welcomeMessage = `
@@ -175,63 +167,43 @@ Send me any Instagram link (Reel, Post, Story, Carousel) and I'll download it fo
   bot.sendMessage(chatId, welcomeMessage, { parse_mode: "Markdown" });
 });
 
-// Handle all messages that contain an Instagram link
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
 
-  if (!text) return;
+  if (!text || !text.includes("instagram.com")) return;
 
-  // Check if message contains an Instagram URL
-  if (!text.includes("instagram.com")) return;
-
-  // Show typing indicator
   bot.sendChatAction(chatId, "typing");
-
-  // Extract the clean link (remove tracking parameters)
   const cleanUrl = cleanLink(text);
-
-  // Send initial waiting message
   const waitMsg = await bot.sendMessage(chatId, "⏳ Downloading media...");
 
   try {
     const media = await downloadInstagramMedia(cleanUrl);
 
-    // If media is a string, treat as single media
     if (typeof media === "string") {
       const type = guessMediaType(media);
       await sendMedia(chatId, media, type);
-    }
-    // If media is an array, send each item
-    else if (Array.isArray(media)) {
+    } else if (Array.isArray(media)) {
       await bot.sendMessage(chatId, `📦 Found ${media.length} items. Sending...`);
       for (let i = 0; i < media.length; i++) {
         const item = media[i];
         const type = guessMediaType(item);
         await sendMedia(chatId, item, type);
-        // Small delay to avoid flooding Telegram API
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await new Promise(resolve => setTimeout(resolve, 500));
       }
       await bot.sendMessage(chatId, "✅ All items sent!");
     } else {
       throw new Error("Unexpected response format");
     }
 
-    // Delete the waiting message (optional)
-    bot.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
-
+    await bot.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
   } catch (error) {
     console.error("Download error:", error.message);
-    // Delete waiting message and send error
-    bot.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
-    bot.sendMessage(chatId, `❌ ${error.message}`);
+    await bot.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
+    await bot.sendMessage(chatId, `❌ ${error.message}`);
   }
 });
 
-// ========================
-//  GLOBAL ERROR HANDLING
-// ========================
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason);
-  // Optionally notify admin via bot
 });

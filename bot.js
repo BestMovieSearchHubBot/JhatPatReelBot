@@ -46,42 +46,8 @@ function saveCache() {
 }
 
 // ===== STATE =====
-const userState = {};
 let queue = [];
 let processing = false;
-
-// ===== TOKEN =====
-function generateToken(userId) {
-  const time = Date.now();
-  const hash = crypto.createHash("sha256")
-    .update(userId + time + SECRET)
-    .digest("hex");
-  return `${userId}.${time}.${hash}`;
-}
-
-function verifyToken(token, userId) {
-  try {
-    const [uid, time, hash] = token.split(".");
-    if (parseInt(uid) !== userId) return false;
-
-    const newHash = crypto.createHash("sha256")
-      .update(uid + time + SECRET)
-      .digest("hex");
-
-    if (newHash !== hash) return false;
-
-    if (Date.now() - time > 10 * 60 * 1000) return false;
-
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// ===== SHORT LINK =====
-function shortLink(token) {
-  return `https://your-shortlink.com/?redirect=https://t.me/${BOT_USERNAME}?start=${token}`;
-}
 
 // ===== DOWNLOAD API (RapidAPI) =====
 async function rapidDownload(link) {
@@ -97,7 +63,6 @@ async function rapidDownload(link) {
     }
   );
 
-  // RapidAPI ka response media array me hota hai
   return res.data.media || res.data[0] || link;
 }
 
@@ -143,7 +108,7 @@ async function downloadFile(url) {
   });
 }
 
-// ===== QUEUE =====
+// ===== QUEUE PROCESS =====
 async function processQueue() {
   if (processing) return;
   processing = true;
@@ -161,12 +126,12 @@ async function processQueue() {
 
       setTimeout(() => {
         bot.deleteMessage(chatId, sent.message_id).catch(() => {});
-        fs.unlinkSync(file); // Delete video after 2 min
+        fs.unlinkSync(file); // delete after 2 minutes
       }, 120000);
 
     } catch (err) {
-      bot.sendMessage(chatId, "❌ Failed");
       console.log(err);
+      bot.sendMessage(chatId, "❌ Failed to download");
     }
   }
 
@@ -179,45 +144,25 @@ bot.on("message", (msg) => {
   const userId = msg.from.id;
   const text = msg.text;
 
-  if (!text || !text.includes("instagram.com")) return;
+  if (!text) return;
 
+  // /start without token
+  if (text === "/start") {
+    bot.sendMessage(chatId, `👋 Hello! Send me an Instagram reel link to download.`);
+    return;
+  }
+
+  // Only Instagram links
+  if (!text.includes("instagram.com")) return;
+
+  // Add user to DB
   if (!users.users.includes(userId)) users.users.push(userId);
   users.lastSeen[userId] = Date.now();
   saveUsers();
 
-  const token = generateToken(userId);
-  userState[chatId] = { link: text };
-
-  bot.sendMessage(chatId, "👇 Unlock karo", {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "🚀 Unlock", url: shortLink(token) }]
-      ]
-    }
-  });
-});
-
-// ===== VERIFY TOKEN =====
-bot.onText(/\/start (.+)/, (msg, match) => {
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
-  const token = match[1];
-
-  if (!verifyToken(token, userId)) {
-    return bot.sendMessage(chatId, "❌ Invalid");
-  }
-
-  if (!userState[chatId]) {
-    return bot.sendMessage(chatId, "⚠️ Link bhejo pehle");
-  }
-
-  queue.push({
-    chatId,
-    link: userState[chatId].link
-  });
-
-  bot.sendMessage(chatId, "✅ Added to queue");
-
+  // Add to queue
+  queue.push({ chatId, link: text });
+  bot.sendMessage(chatId, "✅ Link added to queue, processing...");
   processQueue();
 });
 
@@ -225,7 +170,5 @@ bot.onText(/\/start (.+)/, (msg, match) => {
 bot.onText(/\/stats/, (msg) => {
   if (msg.from.id !== ADMIN_ID) return;
 
-  bot.sendMessage(msg.chat.id,
-    `👥 Total Users: ${users.users.length}`
-  );
+  bot.sendMessage(msg.chat.id, `👥 Total Users: ${users.users.length}`);
 });

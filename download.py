@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import sys
+import io
+import contextlib
 from parth_dl import InstagramDownloader
 
 def main():
@@ -10,15 +12,14 @@ def main():
     url = sys.argv[1]
     try:
         dl = InstagramDownloader(verbose=False)
-        # download() returns a list of file paths (even for single media)
-        file_paths = dl.download(url)
+        # Redirect stdout to suppress any prints from the library
+        with contextlib.redirect_stdout(io.StringIO()):
+            file_paths = dl.download(url)
 
-        # If it's a list, print each path on its own line
         if isinstance(file_paths, list):
             for path in file_paths:
                 print(path)
         else:
-            # In case it returns a single string (though unlikely)
             print(file_paths)
 
     except Exception as e:

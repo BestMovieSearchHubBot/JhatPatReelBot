@@ -35,13 +35,24 @@ function cleanLink(link) {
 }
 
 /**
- * Tries to extract media URLs from any API response
+ * Tries to extract media URLs from any API response.
+ * Skips URLs that are likely Instagram pages (unless they end with media extensions).
  */
 function extractMediaUrls(data) {
   const urls = [];
 
+  // Heuristic: a media URL should either have a media extension or not be an Instagram page
+  const isMediaUrl = (url) => {
+    if (!url.startsWith("http")) return false;
+    // If it's an Instagram domain but doesn't end with a media extension, it's probably the post page
+    if (url.includes("instagram.com") && !/\.(mp4|mov|avi|webm|jpg|jpeg|png|gif|webp)$/i.test(url)) {
+      return false;
+    }
+    return true;
+  };
+
   const addUrl = (val) => {
-    if (val && typeof val === "string" && (val.startsWith("http") || val.startsWith("https"))) {
+    if (val && typeof val === "string" && isMediaUrl(val)) {
       urls.push(val);
     }
   };
@@ -57,6 +68,7 @@ function extractMediaUrls(data) {
     }
   };
 
+  // Common field names that might contain media URLs
   const fields = ["video", "video_url", "url", "media", "image", "images", "carousel_media", "videos"];
   for (const field of fields) {
     const val = data[field];
@@ -67,15 +79,18 @@ function extractMediaUrls(data) {
     }
   }
 
+  // Recursively check nested "data" objects
   if (data.data && typeof data.data === "object") {
     const nestedUrls = extractMediaUrls(data.data);
     urls.push(...nestedUrls);
   }
 
+  // If data itself is an array
   if (Array.isArray(data)) {
     processArray(data);
   }
 
+  // Remove duplicates
   return [...new Set(urls)];
 }
 
@@ -103,11 +118,12 @@ async function downloadInstagramMedia(url) {
     }
 
     const mediaUrls = extractMediaUrls(response.data);
-    console.log("Extracted media URLs:", mediaUrls);
+    console.log("Extracted media URLs after filtering:", mediaUrls);
 
     if (mediaUrls.length === 0) {
-      console.error("No URLs extracted. Raw response:", response.data);
-      throw new Error("No media URLs found in API response. Check the link or API.");
+      // Send a snippet of the response to help debug
+      const snippet = JSON.stringify(response.data).slice(0, 500);
+      throw new Error(`No media URLs found in API response. Response snippet: ${snippet}`);
     }
 
     return mediaUrls.length === 1 ? mediaUrls[0] : mediaUrls;
@@ -116,13 +132,13 @@ async function downloadInstagramMedia(url) {
     if (error.response) {
       console.error("API response data:", error.response.data);
     }
-    throw new Error("Failed to fetch media from Instagram. Please check the link.");
+    throw new Error(error.message || "Failed to fetch media from Instagram. Please check the link.");
   }
 }
 
 async function sendMedia(chatId, mediaUrl, type) {
   try {
-    // Try to check file size via HEAD request (optional, may fail)
+    // Optional: check file size via HEAD request
     try {
       const headRes = await axios.head(mediaUrl, { timeout: 5000 });
       const contentLength = parseInt(headRes.headers['content-length']);

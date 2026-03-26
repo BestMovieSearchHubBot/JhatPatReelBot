@@ -50,18 +50,75 @@ async function downloadInstagramMedia(url) {
         headers: {
           "x-rapidapi-key": RAPID_API_KEY,
           "x-rapidapi-host": "instagram-reels-downloader-api.p.rapidapi.com",
+          "Content-Type": "application/json", // optional but added for completeness
         },
         timeout: 15000, // 15 seconds timeout
       }
     );
 
-    // The API response may contain:
-    // - media: a string (single video/image)
-    // - media: an array (multiple for carousel)
-    const media = response.data.media;
-    if (!media) throw new Error("No media found in API response");
+    // Log the full response for debugging (optional, remove in production)
+    console.log("API Response:", JSON.stringify(response.data, null, 2));
 
-    return media;
+    // Check if the response indicates success
+    if (response.data.status && response.data.status !== "ok") {
+      throw new Error(`API error: ${response.data.message || "Unknown error"}`);
+    }
+
+    // Try to extract media URLs from various possible structures
+    let mediaUrls = [];
+
+    // 1. If there's a video_url (for reels/videos)
+    if (response.data.video_url) {
+      mediaUrls.push(response.data.video_url);
+    }
+    // 2. If there's a video field (sometimes it's an object)
+    else if (response.data.video && typeof response.data.video === "string") {
+      mediaUrls.push(response.data.video);
+    }
+    // 3. If there's an array of images (carousel)
+    else if (response.data.images && Array.isArray(response.data.images)) {
+      mediaUrls.push(...response.data.images);
+    }
+    // 4. If there's an array of videos (rare)
+    else if (response.data.videos && Array.isArray(response.data.videos)) {
+      mediaUrls.push(...response.data.videos);
+    }
+    // 5. If there's a media field (as originally used)
+    else if (response.data.media) {
+      if (typeof response.data.media === "string") {
+        mediaUrls.push(response.data.media);
+      } else if (Array.isArray(response.data.media)) {
+        mediaUrls.push(...response.data.media);
+      }
+    }
+    // 6. If there's a carousel_media field (another common name)
+    else if (response.data.carousel_media && Array.isArray(response.data.carousel_media)) {
+      mediaUrls.push(...response.data.carousel_media);
+    }
+    // 7. If the whole response is an array (unlikely)
+    else if (Array.isArray(response.data)) {
+      mediaUrls.push(...response.data);
+    }
+    // 8. If the response contains a data object (nested)
+    else if (response.data.data) {
+      const nested = response.data.data;
+      if (nested.video_url) mediaUrls.push(nested.video_url);
+      else if (nested.images) mediaUrls.push(...nested.images);
+      else if (nested.media) mediaUrls.push(...nested.media);
+    }
+
+    // Remove any falsy values and ensure each is a string
+    mediaUrls = mediaUrls.filter(Boolean).map(item => typeof item === "string" ? item : item.url || item);
+
+    if (mediaUrls.length === 0) {
+      throw new Error("No media URLs found in API response. Check the link or API.");
+    }
+
+    // If only one URL, return as a string for simpler handling
+    if (mediaUrls.length === 1) {
+      return mediaUrls[0];
+    }
+    return mediaUrls;
   } catch (error) {
     console.error("Download API error:", error.message);
     if (error.response) {

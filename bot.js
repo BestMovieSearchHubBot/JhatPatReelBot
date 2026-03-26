@@ -1,7 +1,9 @@
+// ===== IMPORTS =====
 const TelegramBot = require("node-telegram-bot-api");
 const axios = require("axios");
 const fs = require("fs");
 const crypto = require("crypto");
+const express = require("express");
 
 // ===== ENV =====
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -9,6 +11,18 @@ const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const BOT_USERNAME = process.env.BOT_USERNAME;
 const SECRET = process.env.SECRET;
 const RAPID_KEY = process.env.RAPID_API_KEY;
+
+// ===== EXPRESS SERVER (Web Service) =====
+const app = express();
+
+app.get("/", (req, res) => {
+  res.send("Bot is running");
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
 
 // ===== BOT =====
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -69,20 +83,22 @@ function shortLink(token) {
   return `https://your-shortlink.com/?redirect=https://t.me/${BOT_USERNAME}?start=${token}`;
 }
 
-// ===== DOWNLOAD API 1 (RapidAPI) =====
+// ===== DOWNLOAD API (RapidAPI) =====
 async function rapidDownload(link) {
   const res = await axios.get(
-    "https://instagram-downloader-download-instagram-videos-stories.p.rapidapi.com/index",
+    "https://instagram-reels-downloader-api.p.rapidapi.com/download",
     {
       params: { url: link },
       headers: {
-        "X-RapidAPI-Key": RAPID_KEY,
-        "X-RapidAPI-Host": "instagram-reels-downloader-api.p.rapidapi.com"
+        "Content-Type": "application/json",
+        "x-rapidapi-host": "instagram-reels-downloader-api.p.rapidapi.com",
+        "x-rapidapi-key": RAPID_KEY
       }
     }
   );
 
-  return res.data.media;
+  // RapidAPI ka response media array me hota hai
+  return res.data.media || res.data[0] || link;
 }
 
 // ===== BACKUP API =====
@@ -93,12 +109,9 @@ async function backupDownload(link) {
 
 // ===== MAIN DOWNLOAD =====
 async function getVideo(link) {
-
-  // cache check
   if (cache[link]) return cache[link];
 
   let videoUrl;
-
   try {
     videoUrl = await rapidDownload(link);
   } catch {
@@ -147,20 +160,20 @@ async function processQueue() {
       const sent = await bot.sendVideo(chatId, file);
 
       setTimeout(() => {
-        bot.deleteMessage(chatId, sent.message_id).catch(()=>{});
+        bot.deleteMessage(chatId, sent.message_id).catch(() => {});
+        fs.unlinkSync(file); // Delete video after 2 min
       }, 120000);
 
-      fs.unlinkSync(file);
-
-    } catch {
+    } catch (err) {
       bot.sendMessage(chatId, "❌ Failed");
+      console.log(err);
     }
   }
 
   processing = false;
 }
 
-// ===== MESSAGE =====
+// ===== MESSAGE HANDLER =====
 bot.on("message", (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -184,7 +197,7 @@ bot.on("message", (msg) => {
   });
 });
 
-// ===== VERIFY =====
+// ===== VERIFY TOKEN =====
 bot.onText(/\/start (.+)/, (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;

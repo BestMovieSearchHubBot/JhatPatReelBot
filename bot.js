@@ -1,22 +1,22 @@
 // ===== IMPORTS =====
 const TelegramBot = require("node-telegram-bot-api");
-const axios = require("axios");
 const fs = require("fs");
 const crypto = require("crypto");
 const express = require("express");
+const { exec } = require("child_process");
+const path = require("path");
 
 // ===== ENV =====
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 const BOT_USERNAME = process.env.BOT_USERNAME;
 const SECRET = process.env.SECRET;
-const RAPID_KEY = process.env.RAPID_API_KEY;
 
-// ===== EXPRESS SERVER (Web Service) =====
+// ===== EXPRESS SERVER =====
 const app = express();
 
 app.get("/", (req, res) => {
-  res.send("Bot is running");
+  res.send("Bot is running 🚀");
 });
 
 const PORT = process.env.PORT || 3000;
@@ -29,82 +29,63 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 // ===== DATABASE =====
 let users = { users: [], lastSeen: {} };
-let cache = {};
 
 if (fs.existsSync("users.json")) {
   users = JSON.parse(fs.readFileSync("users.json"));
 }
-if (fs.existsSync("cache.json")) {
-  cache = JSON.parse(fs.readFileSync("cache.json"));
-}
 
 function saveUsers() {
   fs.writeFileSync("users.json", JSON.stringify(users));
-}
-function saveCache() {
-  fs.writeFileSync("cache.json", JSON.stringify(cache));
 }
 
 // ===== STATE =====
 let queue = [];
 let processing = false;
 
-// ===== DOWNLOAD API (RapidAPI) =====
-async function rapidDownload(link) {
-  const res = await axios.get(
-    "https://instagram-reels-downloader-api.p.rapidapi.com/download",
-    {
-      params: { url: link },
-      headers: {
-        "Content-Type": "application/json",
-        "x-rapidapi-host": "instagram-reels-downloader-api.p.rapidapi.com",
-        "x-rapidapi-key": RAPID_KEY
-      }
-    }
-  );
-
-  return res.data.media || res.data[0] || link;
+// ===== TOKEN (optional unlock) =====
+function generateToken(userId) {
+  const time = Date.now();
+  const hash = crypto.createHash("sha256")
+    .update(userId + time + SECRET)
+    .digest("hex");
+  return `${userId}.${time}.${hash}`;
 }
 
-// ===== BACKUP API =====
-async function backupDownload(link) {
-  const res = await axios.get(`https://api.agatz.xyz/api/ig?url=${link}`);
-  return res.data.data[0].url;
-}
-
-// ===== MAIN DOWNLOAD =====
-async function getVideo(link) {
-  if (cache[link]) return cache[link];
-
-  let videoUrl;
+function verifyToken(token, userId) {
   try {
-    videoUrl = await rapidDownload(link);
+    const [uid, time, hash] = token.split(".");
+    if (parseInt(uid) !== userId) return false;
+
+    const newHash = crypto.createHash("sha256")
+      .update(uid + time + SECRET)
+      .digest("hex");
+
+    if (newHash !== hash) return false;
+    if (Date.now() - time > 10 * 60 * 1000) return false;
+
+    return true;
   } catch {
-    videoUrl = await backupDownload(link);
+    return false;
   }
-
-  cache[link] = videoUrl;
-  saveCache();
-
-  return videoUrl;
 }
 
-// ===== FILE DOWNLOAD =====
-async function downloadFile(url) {
-  const path = `video_${Date.now()}.mp4`;
-
-  const res = await axios({
-    url,
-    method: "GET",
-    responseType: "stream"
-  });
-
-  const writer = fs.createWriteStream(path);
-  res.data.pipe(writer);
-
+// ===== FILE DOWNLOAD via yt-dlp (max 720p) =====
+async function downloadVideo(link) {
   return new Promise((resolve, reject) => {
-    writer.on("finish", () => resolve(path));
-    writer.on("error", reject);
+    const filename = `video_${Date.now()}.mp4`;
+    const filepath = path.join(__dirname, filename);
+
+    // yt-dlp command: best format under 720p
+    const cmd = `yt-dlp -f "bestvideo[height<=720]+bestaudio/best[height<=720]" -o "${filepath}" "${link}"`;
+
+    exec(cmd, (error, stdout, stderr) => {
+      if (error) {
+        console.log(stderr);
+        if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
+        return reject(error);
+      }
+      resolve(filepath);
+    });
   });
 }
 
@@ -116,22 +97,26 @@ async function processQueue() {
   while (queue.length > 0) {
     const { chatId, link } = queue.shift();
 
+    let file;
     try {
-      await bot.sendMessage(chatId, "⏳ Processing...");
+      await bot.sendMessage(chatId, "⏳ Processing your video...");
 
-      const videoUrl = await getVideo(link);
-      const file = await downloadFile(videoUrl);
+      file = await downloadVideo(link);
 
-      const sent = await bot.sendVideo(chatId, file);
+      // sendDocument ensures video is downloadable/playable
+      const sent = await bot.sendDocument(chatId, file, { caption: "Here is your video 🎬" });
 
+      // delete after 2 min (server cleanup)
       setTimeout(() => {
         bot.deleteMessage(chatId, sent.message_id).catch(() => {});
-        fs.unlinkSync(file); // delete after 2 minutes
+        if (fs.existsSync(file)) fs.unlinkSync(file);
       }, 120000);
 
     } catch (err) {
       console.log(err);
-      bot.sendMessage(chatId, "❌ Failed to download");
+      bot.sendMessage(chatId, "❌ Failed to download video");
+      // Cleanup partial file if exists
+      if (file && fs.existsSync(file)) fs.unlinkSync(file);
     }
   }
 

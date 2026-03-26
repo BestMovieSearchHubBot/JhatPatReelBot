@@ -40,14 +40,12 @@ function cleanLink(link) {
 function extractMediaUrls(data) {
   const urls = [];
 
-  // Helper to add a URL if it's a string
   const addUrl = (val) => {
     if (val && typeof val === "string" && (val.startsWith("http") || val.startsWith("https"))) {
       urls.push(val);
     }
   };
 
-  // Helper to process arrays
   const processArray = (arr) => {
     if (Array.isArray(arr)) {
       for (const item of arr) {
@@ -59,7 +57,6 @@ function extractMediaUrls(data) {
     }
   };
 
-  // Common field names
   const fields = ["video", "video_url", "url", "media", "image", "images", "carousel_media", "videos"];
   for (const field of fields) {
     const val = data[field];
@@ -70,18 +67,16 @@ function extractMediaUrls(data) {
     }
   }
 
-  // If data has a nested "data" object
   if (data.data && typeof data.data === "object") {
     const nestedUrls = extractMediaUrls(data.data);
     urls.push(...nestedUrls);
   }
 
-  // If data itself is an array
   if (Array.isArray(data)) {
     processArray(data);
   }
 
-  return [...new Set(urls)]; // remove duplicates
+  return [...new Set(urls)];
 }
 
 async function downloadInstagramMedia(url) {
@@ -99,25 +94,22 @@ async function downloadInstagramMedia(url) {
       }
     );
 
-    // Log the full response (this will appear in your server logs)
     console.log("=== API Response for", url, "===");
     console.log(JSON.stringify(response.data, null, 2));
     console.log("=================================");
 
-    // Check for error status
     if (response.data.status && response.data.status !== "ok") {
       throw new Error(`API returned status "${response.data.status}": ${response.data.message || "No details"}`);
     }
 
-    // Extract media URLs
     const mediaUrls = extractMediaUrls(response.data);
+    console.log("Extracted media URLs:", mediaUrls);
 
     if (mediaUrls.length === 0) {
       console.error("No URLs extracted. Raw response:", response.data);
       throw new Error("No media URLs found in API response. Check the link or API.");
     }
 
-    // Return single string if only one, else array
     return mediaUrls.length === 1 ? mediaUrls[0] : mediaUrls;
   } catch (error) {
     console.error("Download API error:", error.message);
@@ -130,6 +122,23 @@ async function downloadInstagramMedia(url) {
 
 async function sendMedia(chatId, mediaUrl, type) {
   try {
+    // Try to check file size via HEAD request (optional, may fail)
+    try {
+      const headRes = await axios.head(mediaUrl, { timeout: 5000 });
+      const contentLength = parseInt(headRes.headers['content-length']);
+      if (!isNaN(contentLength)) {
+        const sizeMB = contentLength / (1024 * 1024);
+        const maxSizeMB = (type === 'video') ? 50 : 20;
+        if (sizeMB > maxSizeMB) {
+          await bot.sendMessage(chatId, `⚠️ File is ${sizeMB.toFixed(1)} MB, which exceeds Telegram's limit of ${maxSizeMB} MB for ${type}s.\nYou can download it directly: ${mediaUrl}`);
+          return;
+        }
+      }
+    } catch (headErr) {
+      // HEAD request may fail, continue anyway
+      console.log("HEAD request failed:", headErr.message);
+    }
+
     if (type === "video") {
       await bot.sendVideo(chatId, mediaUrl, { caption: "✅ Video downloaded" });
     } else if (type === "image") {
@@ -139,7 +148,7 @@ async function sendMedia(chatId, mediaUrl, type) {
     }
   } catch (err) {
     console.error("Error sending media:", err.message);
-    await bot.sendMessage(chatId, "⚠️ Failed to send the media. Possibly unsupported format or too large.");
+    await bot.sendMessage(chatId, `⚠️ Failed to send the media. Possibly unsupported format or too large.\nDirect link: ${mediaUrl}`);
   }
 }
 
@@ -182,12 +191,14 @@ bot.on("message", async (msg) => {
 
     if (typeof media === "string") {
       const type = guessMediaType(media);
+      console.log(`Sending ${type} to ${chatId}: ${media}`);
       await sendMedia(chatId, media, type);
     } else if (Array.isArray(media)) {
       await bot.sendMessage(chatId, `📦 Found ${media.length} items. Sending...`);
       for (let i = 0; i < media.length; i++) {
         const item = media[i];
         const type = guessMediaType(item);
+        console.log(`Sending item ${i+1} (${type}) to ${chatId}: ${item}`);
         await sendMedia(chatId, item, type);
         await new Promise(resolve => setTimeout(resolve, 500));
       }

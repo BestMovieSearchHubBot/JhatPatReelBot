@@ -82,7 +82,17 @@ bot.on("message", async (msg) => {
 
 async function sendMedia(chatId, filePath) {
     try {
-        // Determine file type from extension
+        // Sanitize filename to avoid special characters
+        const dir = require('path').dirname(filePath);
+        const base = require('path').basename(filePath);
+        const safeBase = base.replace(/[^a-zA-Z0-9.-]/g, '_');
+        const safePath = require('path').join(dir, safeBase);
+        
+        if (safePath !== filePath && fs.existsSync(filePath)) {
+            fs.renameSync(filePath, safePath);
+            filePath = safePath;
+        }
+
         const ext = filePath.split('.').pop().toLowerCase();
         if (['mp4', 'mov', 'avi', 'webm'].includes(ext)) {
             await bot.sendVideo(chatId, filePath, { caption: "✅ Video downloaded" });

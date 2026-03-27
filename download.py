@@ -12,7 +12,6 @@ def main():
     url = sys.argv[1]
     try:
         dl = InstagramDownloader(verbose=False)
-        # Redirect stdout to suppress library's verbose output
         with contextlib.redirect_stdout(io.StringIO()):
             file_paths = dl.download(url)
 

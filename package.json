@@ -1,7 +1,7 @@
 {
   "name": "instagram-bot",
   "version": "1.0.0",
-  "description": "Telegram bot to download Instagram media with queue and Shortox integration",
+  "description": "Telegram bot with leaderboard and Shortox integration",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
@@ -9,6 +9,7 @@
   "dependencies": {
     "axios": "^1.6.0",
     "express": "^4.18.0",
+    "mongoose": "^7.0.0",
     "node-telegram-bot-api": "^0.64.0"
   }
 }

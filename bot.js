@@ -18,6 +18,7 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const AMAZON_VOUCHER_CODE = process.env.AMAZON_VOUCHER_CODE;
 const CYCLE_DAYS = 30;
+const OWNER_ID = process.env.OWNER_ID ? parseInt(process.env.OWNER_ID) : 6252869088;
 
 if (!BOT_TOKEN || !MONGODB_URI) {
   console.error("❌ Missing required environment variables: BOT_TOKEN, MONGODB_URI");
@@ -25,7 +26,7 @@ if (!BOT_TOKEN || !MONGODB_URI) {
 }
 
 // ========================
-//  MONGODB CONNECTION WITH BETTER HANDLING
+//  MONGODB CONNECTION
 // ========================
 console.log("📡 Connecting to MongoDB...");
 
@@ -67,7 +68,6 @@ const userStatSchema = new mongoose.Schema({
 userStatSchema.index({ userId: 1, cycle: 1 }, { unique: true });
 const UserStat = mongoose.model('UserStat', userStatSchema);
 
-// Helper to get or create current active cycle
 let currentCycle = null;
 let dbConnected = false;
 
@@ -101,7 +101,6 @@ async function getCurrentCycle() {
   }
 }
 
-// Helper to get cycle info (remaining days, end date)
 async function getCycleInfo() {
   const cycle = await getCurrentCycle();
   if (!cycle) return { daysLeft: null, endDate: null };
@@ -257,7 +256,7 @@ function enqueueDownload(chatId, url, userId, username) {
 }
 
 // ========================
-//  LEADERBOARD FUNCTIONS (with error handling)
+//  LEADERBOARD FUNCTIONS
 // ========================
 async function getLeaderboard() {
   try {
@@ -347,6 +346,106 @@ setInterval(checkCycleEnd, 60 * 60 * 1000);
 checkCycleEnd();
 
 // ========================
+//  STATISTICS (Owner Only)
+// ========================
+const startTime = Date.now();
+
+async function getTotalDownloads() {
+  try {
+    const result = await UserStat.aggregate([
+      { $group: { _id: null, total: { $sum: "$downloadCount" } } }
+    ]);
+    return result.length ? result[0].total : 0;
+  } catch (err) {
+    console.error("Error getting total downloads:", err.message);
+    return 0;
+  }
+}
+
+async function getTotalUniqueUsers() {
+  try {
+    const result = await UserStat.distinct("userId");
+    return result.length;
+  } catch (err) {
+    console.error("Error getting unique users:", err.message);
+    return 0;
+  }
+}
+
+async function getCurrentCycleStats() {
+  const cycle = await getCurrentCycle();
+  if (!cycle) return { downloads: 0, users: 0, topUsers: [] };
+  const downloads = await UserStat.aggregate([
+    { $match: { cycle: cycle._id } },
+    { $group: { _id: null, total: { $sum: "$downloadCount" } } }
+  ]);
+  const totalDownloads = downloads.length ? downloads[0].total : 0;
+  const users = await UserStat.distinct("userId", { cycle: cycle._id });
+  const topUsers = await UserStat.find({ cycle: cycle._id })
+    .sort({ downloadCount: -1 })
+    .limit(5)
+    .lean();
+  return {
+    downloads: totalDownloads,
+    users: users.length,
+    topUsers: topUsers.map(u => ({ username: u.username || `User ${u.userId}`, downloads: u.downloadCount }))
+  };
+}
+
+bot.onText(/\/stats/, async (msg) => {
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+
+  if (userId !== OWNER_ID) {
+    await bot.sendMessage(chatId, "❌ You are not authorized to use this command.");
+    return;
+  }
+
+  const waitMsg = await bot.sendMessage(chatId, "⏳ Fetching statistics...");
+
+  try {
+    const totalDownloads = await getTotalDownloads();
+    const totalUsers = await getTotalUniqueUsers();
+    const currentCycleStats = await getCurrentCycleStats();
+    const { daysLeft } = await getCycleInfo();
+    const queueLen = downloadQueue.length;
+    const uptimeSec = Math.floor((Date.now() - startTime) / 1000);
+    const uptimeStr = `${Math.floor(uptimeSec / 86400)}d ${Math.floor((uptimeSec % 86400) / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m`;
+
+    let statsText = `📊 *Bot Statistics*\n\n`;
+    statsText += `*All Time*\n`;
+    statsText += `Total Downloads: ${totalDownloads}\n`;
+    statsText += `Unique Users: ${totalUsers}\n\n`;
+
+    statsText += `*Current Cycle (${CYCLE_DAYS} days)*\n`;
+    statsText += `Downloads: ${currentCycleStats.downloads}\n`;
+    statsText += `Active Users: ${currentCycleStats.users}\n`;
+    statsText += `Days Left: ${daysLeft !== null ? daysLeft : 'N/A'}\n\n`;
+
+    if (currentCycleStats.topUsers.length) {
+      statsText += `*Top 5 in Current Cycle*\n`;
+      for (let i = 0; i < currentCycleStats.topUsers.length; i++) {
+        const u = currentCycleStats.topUsers[i];
+        statsText += `${i+1}. ${u.username} – ${u.downloads} downloads\n`;
+      }
+      statsText += `\n`;
+    }
+
+    statsText += `*System*\n`;
+    statsText += `Queue Length: ${queueLen}\n`;
+    statsText += `Uptime: ${uptimeStr}\n`;
+    statsText += `MongoDB: ${mongoose.connection.readyState === 1 ? '✅ Connected' : '❌ Disconnected'}`;
+
+    await bot.sendMessage(chatId, statsText, { parse_mode: "Markdown" });
+  } catch (err) {
+    console.error("Error in /stats:", err.message);
+    await bot.sendMessage(chatId, "❌ Failed to retrieve statistics.");
+  } finally {
+    await bot.deleteMessage(chatId, waitMsg.message_id).catch(() => {});
+  }
+});
+
+// ========================
 //  EXPRESS ROUTES
 // ========================
 app.get("/verify", (req, res) => {
@@ -381,7 +480,7 @@ app.listen(PORT, () => console.log(`Express server running on port ${PORT}`));
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   bot.sendMessage(chatId,
-    `🎥 *Instagram Media Downloader*\n\nSend me any Instagram link (Reel, Post, Carousel).\n\n*Verification required* – click the button below to start the download.\n\n🏆 *Win ₹500 Amazon Gift Voucher!*\nTop downloader every 30 days wins.\n\nUse /rank to see leaderboard.`,
+    `🎥 *JhatPat Reel Downloader 🚀*\n\nSend me any Instagram link (Reel, Post, Carousel).\n\n*Verification required* – click the button below to start the download.\n\n🏆 *Win ₹500 Amazon Gift Voucher!*\nTop downloader every 30 days wins.\n\nUse /rank to see leaderboard.`,
     { parse_mode: "Markdown" }
   );
 });
@@ -408,7 +507,6 @@ bot.onText(/\/rank/, async (msg) => {
       leaderboardText += `\n`;
     }
 
-    // Prize and cycle info
     if (daysLeft !== null) {
       leaderboardText += `🎁 *Top 1 wins ₹500 Amazon Gift Voucher!*\n`;
       leaderboardText += `📅 *Cycle ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}*\n\n`;

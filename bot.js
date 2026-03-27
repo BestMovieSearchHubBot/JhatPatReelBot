@@ -15,9 +15,9 @@ const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL;
 const SHORTOX_API_KEY = process.env.SHORTOX_API_KEY;
 const MONGODB_URI = process.env.MONGODB_URI;
-const CHANNEL_ID = process.env.CHANNEL_ID;          // Channel where winner is announced
-const AMAZON_VOUCHER_CODE = process.env.AMAZON_VOUCHER_CODE; // e.g., "ABCD-EFGH-1234"
-const CYCLE_DAYS = 30;                              // Length of one competition cycle
+const CHANNEL_ID = process.env.CHANNEL_ID;
+const AMAZON_VOUCHER_CODE = process.env.AMAZON_VOUCHER_CODE;
+const CYCLE_DAYS = 30;
 
 if (!BOT_TOKEN || !MONGODB_URI) {
   console.error("❌ Missing required environment variables: BOT_TOKEN, MONGODB_URI");
@@ -25,10 +25,33 @@ if (!BOT_TOKEN || !MONGODB_URI) {
 }
 
 // ========================
+//  MONGODB CONNECTION WITH BETTER HANDLING
+// ========================
+console.log("📡 Connecting to MongoDB...");
+
+mongoose.connect(MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+  serverSelectionTimeoutMS: 30000, // 30 seconds timeout
+  socketTimeoutMS: 45000,
+})
+.then(() => console.log("✅ MongoDB connected successfully"))
+.catch(err => {
+  console.error("❌ MongoDB connection error:", err.message);
+  console.log("⚠️ Bot will continue without leaderboard features");
+});
+
+mongoose.connection.on('error', err => {
+  console.error("MongoDB error:", err.message);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.log("MongoDB disconnected");
+});
+
+// ========================
 //  DATABASE MODELS
 // ========================
-mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
-
 const cycleSchema = new mongoose.Schema({
   startDate: { type: Date, default: Date.now, required: true },
   ended: { type: Boolean, default: false }
@@ -46,30 +69,54 @@ const UserStat = mongoose.model('UserStat', userStatSchema);
 
 // Helper to get or create current active cycle
 let currentCycle = null;
+let dbConnected = false;
+
 async function getCurrentCycle() {
-  if (currentCycle && !currentCycle.ended) return currentCycle;
-  const cycle = await Cycle.findOne({ ended: false });
-  if (cycle) {
-    currentCycle = cycle;
-    return cycle;
+  if (!dbConnected) {
+    // Check if connection is ready
+    if (mongoose.connection.readyState !== 1) {
+      console.log("Waiting for MongoDB connection...");
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      if (mongoose.connection.readyState !== 1) {
+        console.error("MongoDB not connected, returning null cycle");
+        return null;
+      }
+    }
+    dbConnected = true;
   }
-  // No active cycle – create one
-  const newCycle = new Cycle({ startDate: new Date(), ended: false });
-  await newCycle.save();
-  currentCycle = newCycle;
-  return newCycle;
+  
+  try {
+    if (currentCycle && !currentCycle.ended) return currentCycle;
+    const cycle = await Cycle.findOne({ ended: false });
+    if (cycle) {
+      currentCycle = cycle;
+      return cycle;
+    }
+    const newCycle = new Cycle({ startDate: new Date(), ended: false });
+    await newCycle.save();
+    currentCycle = newCycle;
+    return newCycle;
+  } catch (err) {
+    console.error("Error getting cycle:", err.message);
+    return null;
+  }
 }
 
-// Update or create user download count
 async function incrementUserDownload(userId, username) {
-  const cycle = await getCurrentCycle();
-  let stat = await UserStat.findOne({ userId, cycle: cycle._id });
-  if (!stat) {
-    stat = new UserStat({ userId, username, downloadCount: 0, cycle: cycle._id });
+  try {
+    const cycle = await getCurrentCycle();
+    if (!cycle) return;
+    
+    let stat = await UserStat.findOne({ userId, cycle: cycle._id });
+    if (!stat) {
+      stat = new UserStat({ userId, username, downloadCount: 0, cycle: cycle._id });
+    }
+    stat.downloadCount += 1;
+    if (username && username !== stat.username) stat.username = username;
+    await stat.save();
+  } catch (err) {
+    console.error("Error incrementing download count:", err.message);
   }
-  stat.downloadCount += 1;
-  if (username && username !== stat.username) stat.username = username;
-  await stat.save();
 }
 
 // ========================
@@ -82,8 +129,6 @@ app.use(express.json());
 const pendingVerification = {};
 let downloadQueue = [];
 let isProcessing = false;
-
-// User verification cache (24 hours)
 const userVerifiedCache = {};
 const VERIFICATION_VALIDITY_HOURS = 24;
 
@@ -152,7 +197,6 @@ async function sendMedia(chatId, filePath) {
   }
 }
 
-// Queue processor
 async function processQueue() {
   if (isProcessing) return;
   if (downloadQueue.length === 0) return;
@@ -178,7 +222,6 @@ async function processQueue() {
       await bot.sendMessage(chatId, "✅ All items sent!");
     }
 
-    // Increment download count in leaderboard
     if (userId) {
       await incrementUserDownload(userId, username);
     }
@@ -204,81 +247,94 @@ function enqueueDownload(chatId, url, userId, username) {
 }
 
 // ========================
-//  LEADERBOARD & CYCLE MANAGEMENT
+//  LEADERBOARD FUNCTIONS (with error handling)
 // ========================
 async function getLeaderboard() {
-  const cycle = await getCurrentCycle();
-  const topUsers = await UserStat.find({ cycle: cycle._id })
-    .sort({ downloadCount: -1 })
-    .limit(10)
-    .lean();
-  return topUsers;
+  try {
+    const cycle = await getCurrentCycle();
+    if (!cycle) return [];
+    const topUsers = await UserStat.find({ cycle: cycle._id })
+      .sort({ downloadCount: -1 })
+      .limit(10)
+      .lean();
+    return topUsers;
+  } catch (err) {
+    console.error("Error getting leaderboard:", err.message);
+    return [];
+  }
 }
 
 async function getUserRank(userId) {
-  const cycle = await getCurrentCycle();
-  const userStat = await UserStat.findOne({ userId, cycle: cycle._id });
-  if (!userStat) return { rank: null, count: 0 };
-  const countHigher = await UserStat.countDocuments({
-    cycle: cycle._id,
-    downloadCount: { $gt: userStat.downloadCount }
-  });
-  return { rank: countHigher + 1, count: userStat.downloadCount };
-}
-
-// Award winner at end of cycle
-async function awardWinner(cycle) {
-  const topUser = await UserStat.findOne({ cycle: cycle._id })
-    .sort({ downloadCount: -1 })
-    .populate('cycle');
-  if (!topUser || topUser.downloadCount === 0) {
-    console.log("No downloads in this cycle, no winner.");
-    return;
-  }
-
-  // Send private message with voucher
   try {
-    await bot.sendMessage(topUser.userId, 
-      `🎉 Congratulations! You are the top downloader of the last ${CYCLE_DAYS}-day cycle with ${topUser.downloadCount} downloads!\n\nYou have won an Amazon Gift Voucher worth ₹500.\n\nVoucher Code: \`${AMAZON_VOUCHER_CODE}\``,
-      { parse_mode: "Markdown" }
-    );
-  } catch (e) {
-    console.error("Failed to send private message to winner:", e.message);
+    const cycle = await getCurrentCycle();
+    if (!cycle) return { rank: null, count: 0 };
+    const userStat = await UserStat.findOne({ userId, cycle: cycle._id });
+    if (!userStat) return { rank: null, count: 0 };
+    const countHigher = await UserStat.countDocuments({
+      cycle: cycle._id,
+      downloadCount: { $gt: userStat.downloadCount }
+    });
+    return { rank: countHigher + 1, count: userStat.downloadCount };
+  } catch (err) {
+    console.error("Error getting user rank:", err.message);
+    return { rank: null, count: 0 };
   }
+}
 
-  // Announce in channel
-  if (CHANNEL_ID) {
-    const winnerName = topUser.username || `User ${topUser.userId}`;
-    const message = `🏆 *Cycle Winner!*\n\n@${winnerName} is the top downloader of the past ${CYCLE_DAYS} days with ${topUser.downloadCount} downloads!\n\nThey have won a ₹500 Amazon Gift Voucher. Congratulations! 🎉\n\nA new cycle has started – compete again!`;
-    try {
-      await bot.sendMessage(CHANNEL_ID, message, { parse_mode: "Markdown" });
-    } catch (e) {
-      console.error("Failed to send channel message:", e.message);
+async function awardWinner(cycle) {
+  try {
+    const topUser = await UserStat.findOne({ cycle: cycle._id })
+      .sort({ downloadCount: -1 });
+    if (!topUser || topUser.downloadCount === 0) {
+      console.log("No downloads in this cycle, no winner.");
+      return;
     }
+
+    try {
+      await bot.sendMessage(topUser.userId, 
+        `🎉 Congratulations! You are the top downloader of the last ${CYCLE_DAYS}-day cycle with ${topUser.downloadCount} downloads!\n\nYou have won an Amazon Gift Voucher worth ₹500.\n\nVoucher Code: \`${AMAZON_VOUCHER_CODE}\``,
+        { parse_mode: "Markdown" }
+      );
+    } catch (e) {
+      console.error("Failed to send private message to winner:", e.message);
+    }
+
+    if (CHANNEL_ID) {
+      const winnerName = topUser.username || `User ${topUser.userId}`;
+      const message = `🏆 *Cycle Winner!*\n\n@${winnerName} is the top downloader of the past ${CYCLE_DAYS} days with ${topUser.downloadCount} downloads!\n\nThey have won a ₹500 Amazon Gift Voucher. Congratulations! 🎉\n\nA new cycle has started – compete again!`;
+      try {
+        await bot.sendMessage(CHANNEL_ID, message, { parse_mode: "Markdown" });
+      } catch (e) {
+        console.error("Failed to send channel message:", e.message);
+      }
+    }
+  } catch (err) {
+    console.error("Error awarding winner:", err.message);
   }
 }
 
-// Check for cycle end (run every hour)
 async function checkCycleEnd() {
-  const cycle = await getCurrentCycle();
-  const now = new Date();
-  const cycleEnd = new Date(cycle.startDate);
-  cycleEnd.setDate(cycleEnd.getDate() + CYCLE_DAYS);
-  if (now >= cycleEnd && !cycle.ended) {
-    // End current cycle
-    cycle.ended = true;
-    await cycle.save();
-    await awardWinner(cycle);
-    // Start new cycle (will be created by getCurrentCycle)
-    currentCycle = null;
-    await getCurrentCycle();
-    console.log(`New cycle started after ${CYCLE_DAYS} days`);
+  try {
+    const cycle = await getCurrentCycle();
+    if (!cycle) return;
+    const now = new Date();
+    const cycleEnd = new Date(cycle.startDate);
+    cycleEnd.setDate(cycleEnd.getDate() + CYCLE_DAYS);
+    if (now >= cycleEnd && !cycle.ended) {
+      cycle.ended = true;
+      await cycle.save();
+      await awardWinner(cycle);
+      currentCycle = null;
+      await getCurrentCycle();
+      console.log(`New cycle started after ${CYCLE_DAYS} days`);
+    }
+  } catch (err) {
+    console.error("Error checking cycle end:", err.message);
   }
 }
 
-// Run cycle check every hour
 setInterval(checkCycleEnd, 60 * 60 * 1000);
-checkCycleEnd(); // initial check
+checkCycleEnd();
 
 // ========================
 //  EXPRESS ROUTES
@@ -289,9 +345,7 @@ app.get("/verify", (req, res) => {
   const data = pendingVerification[token];
   if (!data) return res.status(404).send("Invalid or expired token");
 
-  // Mark user as verified (for 24h cache)
   userVerifiedCache[data.userId] = { verifiedAt: Date.now() };
-
   delete pendingVerification[token];
   enqueueDownload(data.chatId, data.url, data.userId, data.username);
 
@@ -327,25 +381,35 @@ bot.onText(/\/rank/, async (msg) => {
   const userId = msg.from.id;
   const username = msg.from.username || msg.from.first_name;
 
-  const topUsers = await getLeaderboard();
-  const { rank, count } = await getUserRank(userId);
+  try {
+    const topUsers = await getLeaderboard();
+    const { rank, count } = await getUserRank(userId);
 
-  let leaderboardText = `🏆 *Leaderboard – Top 10*\n\n`;
-  for (let i = 0; i < topUsers.length; i++) {
-    const u = topUsers[i];
-    const name = u.username || `User ${u.userId}`;
-    leaderboardText += `${i+1}. @${name} – ${u.downloadCount} downloads\n`;
+    let leaderboardText = `🏆 *Leaderboard – Top 10*\n\n`;
+    
+    if (topUsers.length === 0) {
+      leaderboardText += "No downloads yet in the current cycle. Be the first!\n\n";
+    } else {
+      for (let i = 0; i < topUsers.length; i++) {
+        const u = topUsers[i];
+        const name = u.username || `User ${u.userId}`;
+        leaderboardText += `${i+1}. ${name} – ${u.downloadCount} downloads\n`;
+      }
+      leaderboardText += `\n`;
+    }
+
+    leaderboardText += `*Your Stats:*\n`;
+    if (rank) {
+      leaderboardText += `Rank: #${rank}\nDownloads: ${count}`;
+    } else {
+      leaderboardText += `You haven't downloaded anything yet in the current cycle.`;
+    }
+
+    await bot.sendMessage(chatId, leaderboardText, { parse_mode: "Markdown" });
+  } catch (err) {
+    console.error("Error in /rank command:", err.message);
+    await bot.sendMessage(chatId, "⚠️ Error loading leaderboard. Please try again later.");
   }
-  if (topUsers.length === 0) leaderboardText += "No downloads yet.\n";
-
-  leaderboardText += `\n*Your Stats:*\n`;
-  if (rank) {
-    leaderboardText += `Rank: #${rank}\nDownloads: ${count}`;
-  } else {
-    leaderboardText += `You haven't downloaded anything yet in the current cycle.`;
-  }
-
-  await bot.sendMessage(chatId, leaderboardText, { parse_mode: "Markdown" });
 });
 
 // Handle Instagram links
@@ -358,17 +422,14 @@ bot.on("message", async (msg) => {
   const username = msg.from.username || msg.from.first_name;
   const cleanUrl = text.split("?")[0];
 
-  // Check if user is already verified within 24h
   const cacheEntry = userVerifiedCache[userId];
   const now = Date.now();
   if (cacheEntry && (now - cacheEntry.verifiedAt) < VERIFICATION_VALIDITY_HOURS * 60 * 60 * 1000) {
-    // Already verified – go directly to queue
     enqueueDownload(chatId, cleanUrl, userId, username);
     await bot.sendMessage(chatId, "✅ You are already verified. Download started...");
     return;
   }
 
-  // Not verified – generate verification token and short link
   const token = crypto.randomBytes(16).toString('hex');
   const baseUrl = BASE_URL || `https://${process.env.RENDER_EXTERNAL_HOSTNAME || 'localhost'}`;
   const verificationUrl = `${baseUrl}/verify?token=${token}`;
@@ -397,7 +458,6 @@ bot.on("message", async (msg) => {
   );
 });
 
-// Clean up expired pending tokens (5 min)
 setInterval(() => {
   const now = Date.now();
   for (const [token, data] of Object.entries(pendingVerification)) {

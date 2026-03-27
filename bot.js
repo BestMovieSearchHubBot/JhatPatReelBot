@@ -32,7 +32,7 @@ console.log("📡 Connecting to MongoDB...");
 mongoose.connect(MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
-  serverSelectionTimeoutMS: 30000, // 30 seconds timeout
+  serverSelectionTimeoutMS: 30000,
   socketTimeoutMS: 45000,
 })
 .then(() => console.log("✅ MongoDB connected successfully"))
@@ -73,7 +73,6 @@ let dbConnected = false;
 
 async function getCurrentCycle() {
   if (!dbConnected) {
-    // Check if connection is ready
     if (mongoose.connection.readyState !== 1) {
       console.log("Waiting for MongoDB connection...");
       await new Promise(resolve => setTimeout(resolve, 2000));
@@ -100,6 +99,17 @@ async function getCurrentCycle() {
     console.error("Error getting cycle:", err.message);
     return null;
   }
+}
+
+// Helper to get cycle info (remaining days, end date)
+async function getCycleInfo() {
+  const cycle = await getCurrentCycle();
+  if (!cycle) return { daysLeft: null, endDate: null };
+  const endDate = new Date(cycle.startDate);
+  endDate.setDate(endDate.getDate() + CYCLE_DAYS);
+  const now = new Date();
+  const daysLeft = Math.max(0, Math.ceil((endDate - now) / (1000 * 60 * 60 * 24)));
+  return { daysLeft, endDate };
 }
 
 async function incrementUserDownload(userId, username) {
@@ -371,7 +381,7 @@ app.listen(PORT, () => console.log(`Express server running on port ${PORT}`));
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   bot.sendMessage(chatId,
-    `🎥 *Instagram Media Downloader*\n\nSend me any Instagram link (Reel, Post, Carousel).\n\n*Verification required* – click the button below to start the download.\n\nUse /rank to see leaderboard.`,
+    `🎥 *Instagram Media Downloader*\n\nSend me any Instagram link (Reel, Post, Carousel).\n\n*Verification required* – click the button below to start the download.\n\n🏆 *Win ₹500 Amazon Gift Voucher!*\nTop downloader every 30 days wins.\n\nUse /rank to see leaderboard.`,
     { parse_mode: "Markdown" }
   );
 });
@@ -379,11 +389,11 @@ bot.onText(/\/start/, (msg) => {
 bot.onText(/\/rank/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
-  const username = msg.from.username || msg.from.first_name;
 
   try {
     const topUsers = await getLeaderboard();
     const { rank, count } = await getUserRank(userId);
+    const { daysLeft } = await getCycleInfo();
 
     let leaderboardText = `🏆 *Leaderboard – Top 10*\n\n`;
     
@@ -396,6 +406,12 @@ bot.onText(/\/rank/, async (msg) => {
         leaderboardText += `${i+1}. ${name} – ${u.downloadCount} downloads\n`;
       }
       leaderboardText += `\n`;
+    }
+
+    // Prize and cycle info
+    if (daysLeft !== null) {
+      leaderboardText += `🎁 *Top 1 wins ₹500 Amazon Gift Voucher!*\n`;
+      leaderboardText += `📅 *Cycle ends in ${daysLeft} day${daysLeft !== 1 ? 's' : ''}*\n\n`;
     }
 
     leaderboardText += `*Your Stats:*\n`;
